@@ -14,6 +14,9 @@
 #include <fcntl.h>
 #include <errno.h>
 
+#include <sys/time.h>
+#include <sys/resource.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -29,7 +32,7 @@ extern "C" {
 #define JNHE_HTTP -800
 
 #ifdef DEBUG_LOG
-#define LOG printf("errno:%d\n", errno)
+#define LOG(f,...) printf(f, __VA_ARGS__)
 #else
 #define LOG
 #endif
@@ -59,7 +62,11 @@ static inline int jnh_get(
         return JNHE_FD_FAIL;
     }
 
-    #define ERROR(n) do{close(sockfd); return n;}while(0)
+#ifdef DEBUG_LOG
+#define ERROR(n) do{close(sockfd); printf("jnh return at %d\n", __LINE__); return n;}while(0)
+#else
+#define ERROR(n) do{close(sockfd); return n;}while(0)
+#endif
     server = gethostbyname(host);
 
     if(clock_gettime(CLOCK_MONOTONIC, &time)){
@@ -96,28 +103,39 @@ static inline int jnh_get(
         }
         long startSelectConnect = time.tv_sec * 1000 + time.tv_nsec / 1000000;
         long timeout1 = timeoutAllMs - (startSelectConnect - startDNS);
+        LOG("timeout1:%ld\n", timeout1);
         if(timeout1 <= 0){
             ERROR(JNHE_TIMEOUT);
         }
         long timeout2 = timeoutAfterDNSMs - (startSelectConnect - startConnect);
+        LOG("timeout2:%ld\n", timeout2);
         if( timeout2 <= 0){
             ERROR(JNHE_TIMEOUT);
         }
         struct timeval tv;
+        long finalTimeout = (timeout1 < timeout2 ? timeout1 : timeout2) * 1000;
         fd_set fs;
-        tv.tv_sec = 0;
-        tv.tv_usec = (timeout1 < timeout2 ? timeout1 : timeout2) * 1000;
+        tv.tv_sec = finalTimeout / 1000;
+        tv.tv_usec = (finalTimeout - (tv.tv_sec * 1000)) * 1000;//
         FD_ZERO(&fs);
         FD_SET(sockfd, &fs);
-        if (select(sockfd+1, NULL, &fs, NULL, &tv) > 0) {
+        struct rlimit rlim;
+        getrlimit(RLIMIT_NOFILE, &rlim);
+        LOG("wait connect in %d ms, with socket FD:%d, fd limts:%d, %d\n", (int)(tv.tv_sec * 1000 + tv.tv_usec/1000), sockfd,
+                rlim.rlim_cur, rlim.rlim_max);
+        int selectRet = select(sockfd+1, NULL, &fs, NULL, &tv);
+        if (selectRet > 0) {
             int valopt;
             socklen_t lon = sizeof(int);
             getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (void *) (&valopt), &lon);
             if (valopt) {
                 ERROR(JNHE_CONNECT);
             }
-        }else{
+        }else if (selectRet == 0) {
             ERROR(JNHE_TIMEOUT);
+        } else {
+            LOG("select error with errno:%d\n", errno);
+            ERROR(JNHE_CONNECT);
         }
     }
 
@@ -153,15 +171,15 @@ static inline int jnh_get(
             ERROR(JNHE_TIMEOUT);
         }
         struct timeval tv;
+        long finalTimeout = (timeout1 < timeout2 ? timeout1 : timeout2) * 1000;
         fd_set fs;
-        tv.tv_sec = 0;
-        tv.tv_usec = (timeout1 < timeout2 ? timeout1 : timeout2) * 1000;
+        tv.tv_sec = finalTimeout / 1000;
+        tv.tv_usec = (finalTimeout - (tv.tv_sec * 1000)) * 1000;//
         FD_ZERO(&fs);
         FD_SET(sockfd, &fs);
         if (select(sockfd+1, &fs, NULL, &fs, &tv) > 0) {
             int rd = recv(sockfd, &beforeBodyLine[idx], sizeof(beforeBodyLine) - idx, 0);
             if(rd <= 0){
-                LOG;
                 ERROR(JNHE_READ);
             }
             if(*rspCode == -1) {
@@ -219,15 +237,15 @@ static inline int jnh_get(
             ERROR(JNHE_TIMEOUT);
         }
         struct timeval tv;
+        long finalTimeout = (timeout1 < timeout2 ? timeout1 : timeout2) * 1000;
         fd_set fs;
-        tv.tv_sec = 0;
-        tv.tv_usec = (timeout1 < timeout2 ? timeout1 : timeout2) * 1000;
+        tv.tv_sec = finalTimeout / 1000;
+        tv.tv_usec = (finalTimeout - (tv.tv_sec * 1000)) * 1000;//
         FD_ZERO(&fs);
         FD_SET(sockfd, &fs);
         if (select(sockfd+1, &fs, NULL, &fs, &tv) > 0) {
             int rd = recv(sockfd, &body[idx], *bodyLen - idx, MSG_DONTWAIT);
             if(rd < 0){
-                LOG;
                 ERROR(JNHE_READ);
             }
             if(rd == 0){
